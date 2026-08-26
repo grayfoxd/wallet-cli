@@ -5,16 +5,30 @@ import { StreamManager } from "../../stream/index.js";
 
 function streams(stdin = ""): StreamManager {
   // out/err captured to no-op; readStdinOnce returns the provided value
-  const sm = new StreamManager("text", false, () => {}, () => {});
+  const sm = new StreamManager(
+    "text",
+    false,
+    () => {},
+    () => {},
+  );
   vi.spyOn(sm, "readStdinOnce").mockReturnValue(stdin);
   return sm;
 }
 
 class Backend implements PromptBackend {
-  constructor(private answers: string[], private tty = true) {}
-  isTTY() { return this.tty; }
-  async question() { return this.answers.shift() ?? ""; }
-  async readKey(): Promise<KeyEvent> { return { name: "return" }; }
+  constructor(
+    private answers: string[],
+    private tty = true,
+  ) {}
+  isTTY() {
+    return this.tty;
+  }
+  async question() {
+    return this.answers.shift() ?? "";
+  }
+  async readKey(): Promise<KeyEvent> {
+    return { name: "return" };
+  }
   write() {}
   beginRaw() {}
   endRaw() {}
@@ -53,21 +67,37 @@ describe("primePassword", () => {
     expect(r.masterPassword()).toBe(PW);
   });
   it("set mode via --password-stdin enforces policy (weak_password)", async () => {
-    const r = new SecretResolver(streams("weak\n"), { password: "-" }, new Prompter(new Backend([])));
+    const r = new SecretResolver(
+      streams("weak\n"),
+      { password: "-" },
+      new Prompter(new Backend([])),
+    );
     await expect(r.primePassword({ mode: "set" })).rejects.toMatchObject({ code: "weak_password" });
   });
   it("verify mode via --password-stdin just caches", async () => {
-    const r = new SecretResolver(streams(PW + "\n"), { password: "-" }, new Prompter(new Backend([])));
+    const r = new SecretResolver(
+      streams(PW + "\n"),
+      { password: "-" },
+      new Prompter(new Backend([])),
+    );
     await r.primePassword({ mode: "verify", verify: () => true });
     expect(r.masterPassword()).toBe(PW);
   });
   it("verify mode via --password-stdin rejects a wrong password", async () => {
-    const r = new SecretResolver(streams("wrong\n"), { password: "-" }, new Prompter(new Backend([])));
-    await expect(r.primePassword({ mode: "verify", verify: (pw) => pw === PW })).rejects.toMatchObject({ code: "auth_failed" });
+    const r = new SecretResolver(
+      streams("wrong\n"),
+      { password: "-" },
+      new Prompter(new Backend([])),
+    );
+    await expect(
+      r.primePassword({ mode: "verify", verify: (pw) => pw === PW }),
+    ).rejects.toMatchObject({ code: "auth_failed" });
   });
   it("no source and no TTY → auth_required", async () => {
     const r = new SecretResolver(streams(), {}, new Prompter(new Backend([], false)));
-    await expect(r.primePassword({ mode: "verify", verify: () => true })).rejects.toMatchObject({ code: "auth_required" });
+    await expect(r.primePassword({ mode: "verify", verify: () => true })).rejects.toMatchObject({
+      code: "auth_required",
+    });
   });
 });
 
@@ -89,5 +119,30 @@ describe("clearPrimed (CP-08)", () => {
 
     expect(r.hasMasterPassword()).toBe(false);
     expect(() => r.masterPassword()).toThrow(); // cache gone, no source → auth_required
+  });
+});
+
+describe("primePassword reuses an already-primed password", () => {
+  // The migration gate (ADR-0008) primes the master password before the command runs. Without
+  // this, an interactive run prompts TWICE for the same password: once for the gate, once for
+  // the command.
+  it("does not prompt again when the password is already primed", async () => {
+    const backend = new Backend([PW]); // exactly ONE answer available
+    const r = new SecretResolver(streams(), {}, new Prompter(backend));
+
+    await r.primePassword({ mode: "verify", verify: (pw) => pw === PW });
+    await r.primePassword({ mode: "verify", verify: (pw) => pw === PW });
+
+    expect(r.masterPassword()).toBe(PW);
+  });
+
+  it("re-prompts when the primed password does not satisfy the caller's check", async () => {
+    const OTHER = "Zyxwvu9!";
+    const r = new SecretResolver(streams(), {}, new Prompter(new Backend([PW, OTHER])));
+
+    await r.primePassword({ mode: "verify", verify: (pw) => pw === PW });
+    await r.primePassword({ mode: "verify", verify: (pw) => pw === OTHER });
+
+    expect(r.masterPassword()).toBe(OTHER);
   });
 });

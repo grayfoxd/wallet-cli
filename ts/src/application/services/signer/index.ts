@@ -11,6 +11,7 @@ import { LedgerSigner } from "./ledger.js";
 import { SoftwareSigner } from "./software.js";
 import { Derivation } from "../../../domain/derivation/index.js";
 import { WalletError } from "../../../domain/errors/index.js";
+import { FAMILIES } from "../../../domain/family/index.js";
 
 export class SignerResolver {
   constructor(
@@ -26,39 +27,69 @@ export class SignerResolver {
    * even --dry-run refuses a watch-only account rather than simulating a tx it could never send.
    *
    * `requireSoftware` additionally rejects Ledger accounts before any device interaction, for tx
-   * types the Ledger TRON app firmware cannot sign (e.g. contract deploy, cancel-all-unfreeze).
+   * types the family's Ledger app firmware cannot sign (e.g. TRON contract deploy,
+   * cancel-all-unfreeze — see the callers in the tron use cases).
    */
-  assertCanSign(refOrLabel: string, family: ChainFamily, opts?: { requireSoftware?: boolean }): void {
+  assertCanSign(
+    refOrLabel: string,
+    family: ChainFamily,
+    opts?: { requireSoftware?: boolean },
+  ): void {
     const { wallet, index } = this.keystore.resolveAccount(refOrLabel);
     const address = walletAddress(wallet, family, index);
-    if (!address) throw new WalletError("missing_wallet_address", `account has no ${family} address`);
+    if (!address) {
+      // The account exists but lives on another chain — the same condition resolveAddress
+      // reports, and the same code. `missing_wallet_address` reads as "you have no account",
+      // which is a different problem with a different fix.
+      throw new WalletError("family_mismatch", `account has no ${family} address`);
+    }
     if (wallet.source.type === "watch") {
-      throw new WalletError("watch_only_no_signer", "watch-only account cannot sign; import its secret to sign");
+      throw new WalletError(
+        "watch_only_no_signer",
+        "watch-only account cannot sign; import its secret to sign",
+      );
     }
     if (opts?.requireSoftware && wallet.source.type === "ledger") {
-      throw new WalletError("ledger_unsupported", "this transaction type cannot be signed by the Ledger TRON app; use a software account");
+      throw new WalletError(
+        "ledger_unsupported",
+        `this transaction type cannot be signed by the Ledger ${FAMILIES[family].ledger?.app ?? family} app; use a software account`,
+      );
     }
   }
 
   resolve(refOrLabel: string, family: ChainFamily): Signer {
     const { wallet, index } = this.keystore.resolveAccount(refOrLabel);
     const address = walletAddress(wallet, family, index);
-    if (!address) throw new WalletError("missing_wallet_address", `account has no ${family} address`);
+    if (!address) {
+      // The account exists but lives on another chain — the same condition resolveAddress
+      // reports, and the same code. `missing_wallet_address` reads as "you have no account",
+      // which is a different problem with a different fix.
+      throw new WalletError("family_mismatch", `account has no ${family} address`);
+    }
 
     switch (wallet.source.type) {
       case "privateKey": {
         const { keyId } = wallet.source;
-        return new SoftwareSigner(() => this.keystore.decryptKey(keyId), address, this.signStrategies[family]);
+        return new SoftwareSigner(
+          () => this.keystore.decryptKey(keyId),
+          address,
+          this.signStrategies[family],
+        );
       }
       case "seed": {
         const { vaultId } = wallet.source;
-        const loadKey = () => Derivation.derive(this.keystore.decryptSeed(vaultId), Derivation.path(family, index)).privateKey;
+        const loadKey = () =>
+          Derivation.derive(this.keystore.decryptSeed(vaultId), Derivation.path(family, index))
+            .privateKey;
         return new SoftwareSigner(loadKey, address, this.signStrategies[family]);
       }
       case "ledger":
         return new LedgerSigner(this.ledger, wallet.source.family, wallet.source.path, address);
       case "watch":
-        throw new WalletError("watch_only_no_signer", "watch-only account cannot sign; import its secret to sign");
+        throw new WalletError(
+          "watch_only_no_signer",
+          "watch-only account cannot sign; import its secret to sign",
+        );
     }
   }
 }

@@ -9,6 +9,7 @@ import { TronContractService } from "./contract-service.js";
 const NETWORK = {
   id: "tron:nile",
   family: "tron",
+  nativeSymbol: "TRX",
   chainId: "nile",
 } as unknown as NetworkDescriptor;
 
@@ -32,9 +33,7 @@ describe("TronContractService.send fee-limit guidance", () => {
       })),
     } as unknown as TronGateway;
     const pipeline = {
-      async run(params: {
-        estimate: (tx: unknown) => Promise<Record<string, unknown>>;
-      }) {
+      async run(params: { estimate: (tx: unknown) => Promise<Record<string, unknown>> }) {
         const fee = await params.estimate({});
         return { stage: "plan", tx: { txID: "plan" }, fee };
       },

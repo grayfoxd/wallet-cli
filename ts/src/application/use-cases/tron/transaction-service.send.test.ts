@@ -11,8 +11,8 @@ const RECEIVER = "TEkj3ndMVEmFLYaFrATMwMjBRZ1EAZkucT";
 const NETWORK = {
   id: "tron:nile",
   family: "tron",
+  nativeSymbol: "TRX",
   chainId: "nile",
-  aliases: ["nile"],
   capabilities: [],
 } satisfies NetworkDescriptor;
 
@@ -67,11 +67,7 @@ describe("TronTransactionService recipient resolution", () => {
     });
 
     expect(recipients.resolve).toHaveBeenCalledWith("tron", "alice");
-    expect(gateway.buildNativeTransfer).toHaveBeenCalledWith(
-      OWNER,
-      RECEIVER,
-      "1000000",
-    );
+    expect(gateway.buildNativeTransfer).toHaveBeenCalledWith(OWNER, RECEIVER, "1000000");
     expect(result).toMatchObject({
       kind: "send",
       mode: "dry-run",

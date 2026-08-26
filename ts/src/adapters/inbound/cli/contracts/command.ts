@@ -2,7 +2,10 @@
 import type { ZodObject, ZodRawShape, ZodType } from "zod";
 import type { ChainFamily } from "../../../../domain/family/index.js";
 import type { NetworkDescriptor } from "../../../../domain/types/network.js";
-import type { NetworkRequirement, WalletRequirement } from "../../../../application/contracts/index.js";
+import type {
+  NetworkRequirement,
+  WalletRequirement,
+} from "../../../../application/contracts/index.js";
 import type { ExecutionContext } from "./execution-context.js";
 
 export interface Example {
@@ -70,6 +73,10 @@ interface CommandDefinitionBase<I, O> {
   secretsTtyOnly?: boolean;
   /** gap-fill prompt hints, by field name: "skip" = never prompt this optional field; "default-label" = offer a generated default. */
   promptHints?: Record<string, "skip" | "default-label">;
+  /** fields that must not be gap-filled for THIS invocation, from raw argv. Use when a mode flag
+   *  makes a field meaningless (`backup --records` exports nothing, so no account is asked for).
+   *  Unlike `promptHints`, this is per-invocation rather than static. */
+  skipGapFill?: (argv: Record<string, unknown>) => string[];
   capability?: string;
   /** one-line command listing text (parent group's verb list). Keep it terse — a single line. */
   summary?: string;
@@ -80,6 +87,11 @@ interface CommandDefinitionBase<I, O> {
   /** extra command-specific preconditions rendered in the help "Requires:" block, ahead of the
    *  auto-derived network/auth/account lines (e.g. a connected Ledger for `import ledger`). */
   requires?: string[];
+  /** preconditions that must render AFTER the auto-derived master-password line rather than
+   *  before it. §10.1 rule 4 orders same-class prerequisites by the order the user supplies
+   *  them, and `change-password` asks for the current password before the new one — so its
+   *  "new master password" line has to follow the generated one, not lead it. */
+  requiresAfterAuth?: string[];
   /** mutually-exclusive option sets, surfaced in help; see ExclusiveGroup. */
   exclusive?: ExclusiveGroup[];
   /** per-field zod object; feeds the arity adapter + HelpService. */
@@ -89,13 +101,25 @@ interface CommandDefinitionBase<I, O> {
   examples: Example[];
   /** Optional command-specific renderer for text mode. JSON mode always uses the envelope. */
   formatText?: TextFormatter<O>;
+  /** Override the envelope's `command` for a mode-switching command whose modes return different
+   *  `data` shapes (`backup` vs `backup.records`). `command` names the SEMANTIC command, not how it
+   *  was typed, so a reader can branch on it instead of sniffing fields. Absent ⇒ the path. */
+  commandIdFor?: (input: I) => string;
 }
 
-/** A neutral (family-less) command — wallet/config/meta operations that never receive a
- *  chain target. Networked commands are ChainCommandDefinitions. */
+/**
+ * A neutral (family-less) command — wallet/config/meta operations that are not dispatched by
+ * family. Networked *chain* commands are ChainCommandDefinitions.
+ *
+ * `network: "optional"` does not make it a chain command: it means the selected network is a
+ * DISPLAY SELECTOR (which family's address to show), not a target to act on. No node is
+ * contacted. Such a command must be `wallet: "none"`, or the target resolver's single-family
+ * ACCOUNT check applies and it would refuse to run whenever the active account's family differs
+ * from the network — wrong for a purely local listing.
+ */
 export interface CommandDefinition<I = any, O = any> extends CommandDefinitionBase<I, O> {
-  network: "none";
-  run(ctx: ExecutionContext, net: undefined, input: I): Promise<O>;
+  network: "none" | "optional";
+  run(ctx: ExecutionContext, net: NetworkDescriptor | undefined, input: I): Promise<O>;
 }
 
 /** One family's slice of a chain command: how it runs + its extra flags/validation.
@@ -110,7 +134,7 @@ export interface FamilyBinding<I = any, O = any> {
 
 /** Neutral, service-free declaration of a logical chain command. Generic over O, the single
  *  family-agnostic View every family's run returns. */
-export interface ChainSpec<I = any, O = any> {
+export interface ChainSpec<_I = any, O = any> {
   path: string[];
   network: Exclude<NetworkRequirement, "none">;
   wallet: WalletRequirement;
@@ -118,6 +142,10 @@ export interface ChainSpec<I = any, O = any> {
   broadcasts?: boolean;
   capability?: string;
   stdin?: StdinChannel;
+  /** the stdin channel belongs to ONE family (e.g. `--tx-stdin` carries TRON's transaction JSON).
+   *  Help tags the flag with it and every other family refuses it, the same way a flag declared in
+   *  a single family's binding behaves — a channel no other family reads must say so. */
+  stdinFamily?: ChainFamily;
   interactive?: boolean;
   passwordMode?: "establish" | "verify";
   positionals?: { field: string; placeholder?: string }[];

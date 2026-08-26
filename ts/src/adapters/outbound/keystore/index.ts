@@ -3,15 +3,25 @@
  * registry + root labels + selection (--account/--wallet). Atomic writes under lock.
  * BIP39 passphrase plumbed. Data shapes live in SharedTypes.
  */
+import { WALLETS_VERSION } from "../../../domain/migration/wallets-v2.js";
 import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes, hexToBytes } from "@noble/hashes/utils.js";
 import { base32crockford } from "@scure/base";
 import type {
-  AccountDescriptor, AccountRef, Bytes, ChainFamily, KeystoreBlob, MutationResult, Source, Wallet, WalletsFile } from "../../../domain/types/index.js";
+  AccountDescriptor,
+  AccountRef,
+  Bytes,
+  ChainFamily,
+  KeystoreBlob,
+  MutationResult,
+  Source,
+  Wallet,
+  WalletsFile,
+} from "../../../domain/types/index.js";
 import { CryptoEnvelope } from "../persistence/crypto/index.js";
 import { Derivation } from "../../../domain/derivation/index.js";
-import { familyOf, CHAIN_FAMILIES } from "../../../domain/family/index.js";
+import { familyOf, canonicalAddress, CHAIN_FAMILIES } from "../../../domain/family/index.js";
 import { SOURCE_KINDS, sourceFamily } from "../../../domain/sources/index.js";
 import { AtomicFileStore } from "../persistence/fs/index.js";
 import { ExecutionError, UsageError, WalletError } from "../../../domain/errors/index.js";
@@ -32,7 +42,13 @@ import {
 
 // public data-model helpers used by upper layers (signer/context) — re-exported here so they
 // keep importing from the keystore barrel.
-export { accountIndices, accountRef, decodeVault, encodeVault, walletAddress } from "../../../domain/wallet/index.js";
+export {
+  accountIndices,
+  accountRef,
+  decodeVault,
+  encodeVault,
+  walletAddress,
+} from "../../../domain/wallet/index.js";
 
 type IdPrefix = "wlt" | "vlt" | "key";
 
@@ -56,7 +72,9 @@ export class Keystore {
   // ── registry IO ───────────────────────────────────────────────────────────
   #read(): WalletsFile {
     const f = this.store.readJson<WalletsFile>(this.walletsPath);
-    return f ?? { version: 1, activeAccount: null, wallets: [], labels: {} };
+    // Absent = a fresh keystore, so it is born CURRENT. This default is persisted on the first
+    // write, so a literal version here would stamp every new keystore stale (ADR-0008).
+    return f ?? { version: WALLETS_VERSION, activeAccount: null, wallets: [], labels: {} };
   }
   /** caller must already hold the wallets.json lock (mutators wrap in withLock). */
   #write(f: WalletsFile): void {
@@ -74,8 +92,11 @@ export class Keystore {
 
       if (p.type === "seed") {
         const mnemonic = p.secret.trim();
+        // Its own code, not the generic bucket: the phrase is entered at a hidden prompt, so the
+        // envelope carries no field path to say WHICH value was wrong — the code is all the
+        // caller gets, and `invalid_value` says nothing it did not already know.
         if (!Derivation.validateMnemonic(mnemonic)) {
-          throw new WalletError("invalid_value", "invalid BIP39 mnemonic");
+          throw new WalletError("invalid_mnemonic", "invalid BIP39 mnemonic");
         }
         const entropy = Derivation.mnemonicToEntropy(mnemonic);
         const seed = Derivation.mnemonicToSeed(mnemonic, p.passphrase);
@@ -92,11 +113,31 @@ export class Keystore {
         this.#assertPassword({ createIfAbsent: true });
         // persist passphrase inside the encrypted vault so decryptSeed reconstructs the SAME
         // seed (otherwise the displayed address and the signing key would diverge).
-        this.#writeBlob("vaults", CryptoEnvelope.encrypt(encodeVault(entropy, p.passphrase), password, vaultId, "bip39-seed"));
+        this.#writeBlob(
+          "vaults",
+          CryptoEnvelope.encrypt(
+            encodeVault(entropy, p.passphrase),
+            password,
+            vaultId,
+            "bip39-seed",
+          ),
+        );
         source = { type: "seed", vaultId, addresses: { "0": addr0 } };
       } else {
-        const pk = hexToBytes(p.secret.trim().replace(/^0x/, ""));
-        if (pk.length !== 32) throw new WalletError("invalid_value", "private key must be 32 bytes");
+        // hexToBytes throws its own Error on a non-hex character, which classifyError would turn
+        // into a REDACTED internal_error — the two ways to mistype a private key would then answer
+        // with two different codes, one of them wrong. Both are the same mistake, so both say so.
+        let pk: Uint8Array;
+        try {
+          pk = hexToBytes(p.secret.trim().replace(/^0x/, ""));
+        } catch {
+          throw new WalletError(
+            "invalid_private_key",
+            "private key must be 32 bytes of hex, with or without a 0x prefix",
+          );
+        }
+        if (pk.length !== 32)
+          throw new WalletError("invalid_private_key", "private key must be 32 bytes");
         const addr = derivePrivAddresses(pk);
         const dup = findByAddress(file, addr);
         if (dup) {
@@ -120,12 +161,20 @@ export class Keystore {
     });
   }
 
-  registerLedger(p: { family: ChainFamily; path: string; address: string; label?: string }): MutationResult {
+  registerLedger(p: {
+    family: ChainFamily;
+    path: string;
+    address: string;
+    label?: string;
+  }): MutationResult {
     return this.store.withLock(this.walletsPath, () => {
       const file = this.#read();
       // ledger is single-chain watch-only; the dedup key is (family, path), not address
       // (a hardware account stays distinct from a software one sharing the same key).
-      const dup = findBySource(file, (s) => s.type === "ledger" && s.family === p.family && s.path === p.path);
+      const dup = findBySource(
+        file,
+        (s) => s.type === "ledger" && s.family === p.family && s.path === p.path,
+      );
       if (dup) {
         file.activeAccount = dup;
         this.#write(file);
@@ -151,12 +200,14 @@ export class Keystore {
       const file = this.#read();
       // watch is secret-less; like ledger it stays distinct from a software account with the
       // same address — the dedup key is (family, address), see findWatchByAddress.
-      const dup = findBySource(file, (s) => s.type === "watch" && s.family === p.family && s.address === p.address);
-      if (dup) {
-        file.activeAccount = dup;
-        this.#write(file);
-        return { accountId: dup, created: false };
-      }
+      const dup = findBySource(
+        file,
+        (s) => s.type === "watch" && s.family === p.family && s.address === p.address,
+      );
+      // Registering a watch account does NOT make it active (§3.3): it holds no key, so making
+      // it the active account turns the next write command into `watch_only_no_signer` for a
+      // reason the user never chose. `use <account>` is how the active account changes.
+      if (dup) return { accountId: dup, created: false };
       const walletId = this.#freshId("wlt", file);
       // no encrypted blob: a watch account holds no secret, only family+address.
       const wallet: Wallet = {
@@ -166,7 +217,6 @@ export class Keystore {
       const ref = accountRefOf(wallet, null);
       file.wallets.push(wallet);
       this.#assignLabel(file, ref, p.label);
-      file.activeAccount = ref;
       this.#write(file);
       return { accountId: ref, created: true };
     });
@@ -178,13 +228,17 @@ export class Keystore {
     return this.store.withLock(this.walletsPath, () => {
       const file = this.#read();
       const wallet = file.wallets.find((w) => w.id === walletId);
-      if (!wallet) throw new WalletError("invalid_value", `unknown wallet ${walletId}`);
+      if (!wallet) throw new WalletError("account_not_found", `unknown wallet ${walletId}`);
       // only seed wallets are HD: privateKey has no derivation, ledger must be re-imported per path.
       if (wallet.source.type !== "seed") {
-        const hint = wallet.source.type === "ledger" ? " — import another path with 'import ledger'" : "";
-        throw new WalletError("invalid_value", `${wallet.source.type} wallets are not HD; cannot add accounts${hint}`);
+        const hint =
+          wallet.source.type === "ledger" ? " — import another path with 'import ledger'" : "";
+        throw new WalletError(
+          "seed_not_found",
+          `${wallet.source.type} wallets are not HD; cannot add accounts${hint}`,
+        );
       }
-      const next = index ?? ((Math.max(-1, ...accountIndices(wallet.source)) + 1) | 0);
+      const next = index ?? (Math.max(-1, ...accountIndices(wallet.source)) + 1) | 0;
       const key = String(next);
       let created = false;
       if (!wallet.source.addresses[key]) {
@@ -206,7 +260,7 @@ export class Keystore {
     const ref = this.#toRef(file, refOrLabel);
     const [walletId, idxStr] = ref.split(".");
     const wallet = file.wallets.find((w) => w.id === walletId);
-    if (!wallet) throw new WalletError("invalid_value", `unknown account ${refOrLabel}`);
+    if (!wallet) throw new WalletError("account_not_found", `unknown account ${refOrLabel}`);
     if (wallet.source.type !== "seed") return { wallet, index: -1 };
     let index: number;
     if (idxStr === undefined) {
@@ -234,11 +288,14 @@ export class Keystore {
     const ref = this.#toRef(file, idOrLabel);
     const walletId = ref.split(".")[0]!;
     const wallet = file.wallets.find((w) => w.id === walletId);
-    if (!wallet) throw new WalletError("invalid_value", `unknown wallet ${idOrLabel}`);
+    if (!wallet) throw new WalletError("account_not_found", `unknown wallet ${idOrLabel}`);
     return wallet;
   }
 
-  rename(refOrLabel: string, label: string): { accountId: AccountRef; previousLabel?: string; label: string } {
+  rename(
+    refOrLabel: string,
+    label: string,
+  ): { accountId: AccountRef; previousLabel?: string; label: string } {
     return this.store.withLock(this.walletsPath, () => {
       const file = this.#read();
       const ref = this.#toRef(file, refOrLabel);
@@ -296,6 +353,7 @@ export class Keystore {
     if (s.type === "seed") {
       d.seedId = w.id; // the seed id `derive --seed` takes; also the `list` HD group header.
     }
+    d.derivationPath = derivationPathsOf(s, index);
     return d;
   }
 
@@ -305,7 +363,12 @@ export class Keystore {
 
   /** delete an account/wallet. Reports what scope was removed, whether a secret blob was
    *  destroyed, and the active account afterwards (re-pointed if the old active is gone). */
-  delete(refOrWallet: string): { accountId: AccountRef; scope: "account" | "wallet"; secretRemoved: boolean; newActive: AccountRef | null } {
+  delete(refOrWallet: string): {
+    accountId: AccountRef;
+    scope: "account" | "wallet";
+    secretRemoved: boolean;
+    newActive: AccountRef | null;
+  } {
     return this.store.withLock(this.walletsPath, () => {
       const file = this.#read();
       const ref = this.#toRef(file, refOrWallet);
@@ -332,11 +395,21 @@ export class Keystore {
           this.#removeBlobFiles(wallet.source);
           secretRemoved = true;
         }
-        if (file.activeAccount === ref || (remaining.length === 0 && file.activeAccount?.split(".")[0] === walletId)) {
-          file.activeAccount = file.wallets.length ? accountRefOf(file.wallets[0]!, firstIndex(file.wallets[0]!)) : null;
+        if (
+          file.activeAccount === ref ||
+          (remaining.length === 0 && file.activeAccount?.split(".")[0] === walletId)
+        ) {
+          file.activeAccount = file.wallets.length
+            ? accountRefOf(file.wallets[0]!, firstIndex(file.wallets[0]!))
+            : null;
         }
         this.#write(file);
-        return { accountId: ref, scope: remaining.length === 0 ? "wallet" : "account", secretRemoved, newActive: file.activeAccount };
+        return {
+          accountId: ref,
+          scope: remaining.length === 0 ? "wallet" : "account",
+          secretRemoved,
+          newActive: file.activeAccount,
+        };
       }
 
       // wallet-level delete: remove the wallet, all its accounts/labels and its secret blob.
@@ -345,11 +418,18 @@ export class Keystore {
         if (k === walletId || k.startsWith(`${walletId}.`)) delete file.labels[k];
       }
       if (file.activeAccount && file.activeAccount.split(".")[0] === walletId) {
-        file.activeAccount = file.wallets.length ? accountRefOf(file.wallets[0]!, firstIndex(file.wallets[0]!)) : null;
+        file.activeAccount = file.wallets.length
+          ? accountRefOf(file.wallets[0]!, firstIndex(file.wallets[0]!))
+          : null;
       }
       this.#removeBlobFiles(wallet.source);
       this.#write(file);
-      return { accountId: walletId!, scope: "wallet", secretRemoved: SOURCE_KINDS[wallet.source.type].hasSecret, newActive: file.activeAccount };
+      return {
+        accountId: walletId!,
+        scope: "wallet",
+        secretRemoved: SOURCE_KINDS[wallet.source.type].hasSecret,
+        newActive: file.activeAccount,
+      };
     });
   }
 
@@ -376,7 +456,10 @@ export class Keystore {
     return this.store.withLock(this.walletsPath, () => {
       const verifier = this.store.readJson<KeystoreBlob>(this.#verifierPath());
       if (!verifier) {
-        throw new WalletError("no_software_wallet", "no software wallet; no master password set; nothing to change");
+        throw new WalletError(
+          "no_software_wallet",
+          "no software wallet; no master password set; nothing to change",
+        );
       }
       CryptoEnvelope.decrypt(verifier, oldPassword); // MAC mismatch → auth_failed (wrong old password)
 
@@ -386,7 +469,7 @@ export class Keystore {
       for (const w of file.wallets) {
         const s = w.source;
         if (s.type !== "seed" && s.type !== "privateKey") continue;
-        const dir = s.type === "seed" ? "vaults" as const : "keys" as const;
+        const dir = s.type === "seed" ? ("vaults" as const) : ("keys" as const);
         const id = s.type === "seed" ? s.vaultId : s.keyId;
         const path = this.#blobPath(dir, id);
         const blob = this.store.readJson<KeystoreBlob>(path);
@@ -398,7 +481,10 @@ export class Keystore {
         }
         const plaintext = CryptoEnvelope.decrypt(blob, oldPassword);
         try {
-          entries.push({ path, value: CryptoEnvelope.encrypt(plaintext, newPassword, id, blob.type) });
+          entries.push({
+            path,
+            value: CryptoEnvelope.encrypt(plaintext, newPassword, id, blob.type),
+          });
         } finally {
           plaintext.fill(0); // scrub the decrypted secret from memory as soon as it is re-wrapped
         }
@@ -418,7 +504,11 @@ export class Keystore {
         // is already accurate; let it through unmasked.
         if (e instanceof ExecutionError) throw e;
         // Otherwise writeJsonAll rolled back cleanly: every keystore file is unchanged.
-        throw new ExecutionError("io_error", "failed to write re-encrypted keystores; rolled back, the old password remains in effect", { error: String(e) });
+        throw new ExecutionError(
+          "io_error",
+          "failed to write re-encrypted keystores; rolled back, the old password remains in effect",
+          { error: String(e) },
+        );
       }
       return { wallets: labels, count: labels.length };
     });
@@ -492,11 +582,17 @@ export class Keystore {
   #removeBlobFiles(source: Source): void {
     // ledger keeps no local blob; nothing to unlink.
     const path =
-      source.type === "seed" ? this.#blobPath("vaults", source.vaultId)
-      : source.type === "privateKey" ? this.#blobPath("keys", source.keyId)
-      : undefined;
+      source.type === "seed"
+        ? this.#blobPath("vaults", source.vaultId)
+        : source.type === "privateKey"
+          ? this.#blobPath("keys", source.keyId)
+          : undefined;
     if (path && existsSync(path)) {
-      try { unlinkSync(path); } catch { /* best-effort */ }
+      try {
+        unlinkSync(path);
+      } catch {
+        /* best-effort */
+      }
     }
   }
 
@@ -514,31 +610,49 @@ export class Keystore {
     if (v.startsWith("wlt_")) return v;
     // address form (T… / 0x…): match the unique account holding it in its cache.
     if (familyOf(v) !== undefined) {
+      // Canonicalised on BOTH sides: enumerateAddresses already yields EIP-55, and §1.3 accepts an
+      // all-lower or all-upper EVM address as input. Comparing raw strings would refuse to find an
+      // account by the very spelling the user was told is valid.
+      const wanted = canonicalAddress(v);
       const hits: AccountRef[] = [];
       for (const w of file.wallets) {
         for (const { index, addr } of enumerateAddresses(w)) {
-          if (CHAIN_FAMILIES.some((f) => addr[f] === v)) hits.push(accountRefOf(w, index));
+          if (CHAIN_FAMILIES.some((f) => addr[f] === wanted)) hits.push(accountRefOf(w, index));
         }
       }
-      if (hits.length === 0) throw new WalletError("invalid_value", `no account with address ${input}`);
+      if (hits.length === 0)
+        throw new WalletError("account_not_found", `no account with address ${input}`);
       if (hits.length > 1) {
-        throw new UsageError("invalid_value", `address ${input} matches multiple accounts: ${hits.join(", ")}`);
+        throw new UsageError(
+          "invalid_value",
+          `address ${input} matches multiple accounts: ${hits.join(", ")}`,
+        );
       }
       return hits[0]!;
     }
     const matches = Object.entries(file.labels).filter(
       ([, label]) => label.trim().toLowerCase() === v.toLowerCase(),
     );
-    if (matches.length === 0) throw new WalletError("invalid_value", `no account labelled '${input}'`);
+    // §4.3 names this code for exactly this case. `invalid_value` is the bucket every malformed
+    // option lands in; "that account does not exist here" has one obvious next step (`list`), and
+    // an agent can only take it if the code says so — the message is not something to match on.
+    // The ambiguous cases below keep `invalid_value`: the reference IS valid, it just picks more
+    // than one account, and the fix is to narrow it rather than to go looking for it.
+    if (matches.length === 0)
+      throw new WalletError("account_not_found", `no account labelled '${input}'`);
     if (matches.length > 1) {
-      throw new UsageError("invalid_value", `label '${input}' is ambiguous: ${matches.map((m) => m[0]).join(", ")}`);
+      throw new UsageError(
+        "invalid_value",
+        `label '${input}' is ambiguous: ${matches.map((m) => m[0]).join(", ")}`,
+      );
     }
     return matches[0]![0];
   }
 
   #assignLabel(file: WalletsFile, ref: AccountRef, label?: string): void {
     const value = (label ?? this.#defaultLabel(file)).trim();
-    if (value.startsWith("wlt_")) throw new UsageError("invalid_value", "label must not start with 'wlt_'");
+    if (value.startsWith("wlt_"))
+      throw new UsageError("invalid_value", "label must not start with 'wlt_'");
     for (const [k, existing] of Object.entries(file.labels)) {
       if (existing.trim().toLowerCase() === value.toLowerCase() && k !== ref) {
         throw new UsageError("invalid_value", `label '${value}' already in use by ${k}`);
@@ -554,4 +668,19 @@ export class Keystore {
     while (used.has(`wallet-${n}`)) n++;
     return `wallet-${n}`;
   }
+}
+
+/**
+ * The BIP44 path behind each of an account's addresses.
+ *   - seed: computed per family from the index — the templates differ (§1.2), which is exactly
+ *     what a caller cannot otherwise see.
+ *   - ledger: the single path the user picked on the device, for its one family.
+ *   - watch / privateKey: never derived, so `null` rather than an empty object.
+ */
+function derivationPathsOf(source: Source, index: number | null): Record<string, string> | null {
+  if (source.type === "seed" && index !== null) {
+    return Object.fromEntries(CHAIN_FAMILIES.map((f) => [f, Derivation.path(f, index)]));
+  }
+  if (source.type === "ledger") return { [source.family]: source.path };
+  return null;
 }

@@ -7,10 +7,15 @@
 import { z } from "zod";
 import type { ChainFamily } from "../../../../domain/types/index.js";
 import { isChainCommand } from "../contracts/index.js";
-import type { ChainCommandDefinition, CommandDefinition, StdinChannel } from "../contracts/index.js";
+import type {
+  ChainCommandDefinition,
+  CommandDefinition,
+  StdinChannel,
+} from "../contracts/index.js";
 import { CommandRegistry } from "../registry/index.js";
 import { commandId } from "../command-id.js";
 import { GLOBAL_FLAG_SPECS, type GlobalFlagSpec } from "../globals/index.js";
+import { ERROR_CODES } from "../../../../domain/errors/codes.js";
 
 // Flags accepted on every command (kubectl-style globals + secret channels). The flag model — arity,
 // descriptions, defaults, and the global-vs-command-scoped split — is owned by domain metadata
@@ -38,7 +43,9 @@ function globalFlagDoc(f: GlobalFlagSpec): GlobalFlag {
   };
 }
 
-export const GLOBAL_FLAGS: readonly GlobalFlag[] = GLOBAL_FLAG_SPECS.filter((f) => !f.commandScoped).map(globalFlagDoc);
+export const GLOBAL_FLAGS: readonly GlobalFlag[] = GLOBAL_FLAG_SPECS.filter(
+  (f) => !f.commandScoped,
+).map(globalFlagDoc);
 
 // stdin channel → its documented --*-stdin flag, derived from the command-scoped specs (keyed by secretKey).
 const STDIN_FLAGS = Object.fromEntries(
@@ -64,52 +71,69 @@ function commandInputSchema(input: z.ZodType): unknown {
 }
 
 /** machine-readable catalog of the whole command surface — the agent's single discovery call. */
-export function buildCatalog(registry: CommandRegistry, version: string, familyFilter?: ChainFamily): string {
+export function buildCatalog(
+  registry: CommandRegistry,
+  version: string,
+  familyFilter?: ChainFamily,
+): string {
   const commands = registry
     .all()
-    .filter((cmd) => isChainCommand(cmd)
-      ? !familyFilter || cmd.families[familyFilter] !== undefined
-      : !familyFilter)
-    .map((cmd) => isChainCommand(cmd)
-      ? {
-          id: commandId({ path: cmd.spec.path }),
-          kind: "chain",
-          families: Object.keys(cmd.families),
-          path: cmd.spec.path,
-          usage: `wallet-cli ${cmd.spec.path.join(" ")} [options]`,
-          summary: cmd.spec.summary ?? "",
-          requires: { network: cmd.spec.network, auth: cmd.spec.auth, wallet: cmd.spec.wallet },
-          ...(cmd.spec.capability ? { capability: cmd.spec.capability } : {}),
-          examples: cmd.spec.examples.map((e: { cmd: string }) => e.cmd),
-          ...(cmd.spec.exclusive?.length ? { exclusive: cmd.spec.exclusive } : {}),
-          ...(cmd.spec.stdin ? { inputFlags: inputFlagsFor(cmd.spec) } : {}),
-          inputSchema: commandInputSchema(mergedInput(cmd)),
-        }
-      : {
-          id: commandId(cmd),
-          kind: "neutral",
-          path: cmd.path,
-          usage: commandUsage(cmd),
-          summary: cmd.summary ?? "",
-          requires: { network: cmd.network, auth: cmd.auth, wallet: cmd.wallet },
-          ...(cmd.capability ? { capability: cmd.capability } : {}),
-          examples: cmd.examples.map((e: { cmd: string }) => e.cmd),
-          ...(cmd.exclusive?.length ? { exclusive: cmd.exclusive } : {}),
-          ...(inputFlagsFor(cmd).length ? { inputFlags: inputFlagsFor(cmd) } : {}),
-          inputSchema: commandInputSchema(cmd.input),
-        })
-    .sort((a, b) => a.id.localeCompare(b.id))
-  return JSON.stringify({ tool: "wallet-cli", version, globalFlags: GLOBAL_FLAGS, commands });
+    .filter((cmd) =>
+      isChainCommand(cmd)
+        ? !familyFilter || cmd.families[familyFilter] !== undefined
+        : !familyFilter,
+    )
+    .map((cmd) =>
+      isChainCommand(cmd)
+        ? {
+            id: commandId({ path: cmd.spec.path }),
+            kind: "chain",
+            families: Object.keys(cmd.families),
+            path: cmd.spec.path,
+            usage: `wallet-cli ${cmd.spec.path.join(" ")} [options]`,
+            summary: cmd.spec.summary ?? "",
+            requires: { network: cmd.spec.network, auth: cmd.spec.auth, wallet: cmd.spec.wallet },
+            ...(cmd.spec.capability ? { capability: cmd.spec.capability } : {}),
+            examples: cmd.spec.examples.map((e: { cmd: string }) => e.cmd),
+            ...(cmd.spec.exclusive?.length ? { exclusive: cmd.spec.exclusive } : {}),
+            ...(cmd.spec.stdin ? { inputFlags: inputFlagsFor(cmd.spec) } : {}),
+            inputSchema: commandInputSchema(mergedInput(cmd, familyFilter)),
+          }
+        : {
+            id: commandId(cmd),
+            kind: "neutral",
+            path: cmd.path,
+            usage: commandUsage(cmd),
+            summary: cmd.summary ?? "",
+            requires: { network: cmd.network, auth: cmd.auth, wallet: cmd.wallet },
+            ...(cmd.capability ? { capability: cmd.capability } : {}),
+            examples: cmd.examples.map((e: { cmd: string }) => e.cmd),
+            ...(cmd.exclusive?.length ? { exclusive: cmd.exclusive } : {}),
+            ...(inputFlagsFor(cmd).length ? { inputFlags: inputFlagsFor(cmd) } : {}),
+            inputSchema: commandInputSchema(cmd.input),
+          },
+    )
+    .sort((a, b) => a.id.localeCompare(b.id));
+  // The error index travels with the command surface: an agent discovering what it can call also
+  // learns, in the same call, every `error.code` those calls can answer with.
+  return JSON.stringify({
+    tool: "wallet-cli",
+    version,
+    globalFlags: GLOBAL_FLAGS,
+    errorCodes: ERROR_CODES,
+    commands,
+  });
 }
 
-function mergedInput(def: ChainCommandDefinition): z.ZodType {
+function mergedInput(def: ChainCommandDefinition, family?: ChainFamily): z.ZodType {
   let shape = { ...def.spec.baseFields.shape };
-  for (const binding of Object.values(def.families)) {
+  const bindings = family ? [def.families[family]] : Object.values(def.families);
+  for (const binding of bindings) {
     if (binding?.fields) shape = { ...shape, ...binding.fields.shape };
   }
   let input: z.ZodType = z.object(shape);
   if (def.spec.baseRefine) input = input.superRefine(def.spec.baseRefine);
-  for (const binding of Object.values(def.families)) {
+  for (const binding of bindings) {
     if (binding?.refine) input = input.superRefine(binding.refine);
   }
   return input;

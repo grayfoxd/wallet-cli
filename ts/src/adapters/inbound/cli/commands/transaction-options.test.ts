@@ -3,11 +3,15 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { z } from "zod";
 import { permissionUpdateSpec } from "./permission.js";
-import { txModeFields } from "./shared.js";
+import { governanceTxModeFields, tronTxModeFields, txModeFields } from "./shared.js";
+
+// --permission-id and --expiration are TRON multi-signature concepts and live on the TRON
+// binding's field set; these assertions are about their wording, which did not move.
+const txModeAndTron = { ...txModeFields, ...tronTxModeFields };
 
 describe("transaction option argv coercion", () => {
   it("accepts numeric --permission-id and --expiration values from argv", () => {
-    const parsed = z.object(txModeFields).parse({
+    const parsed = z.object(txModeAndTron).parse({
       buildOnly: true,
       permissionId: "2",
       expiration: "86400000",
@@ -34,8 +38,8 @@ describe("transaction option argv coercion", () => {
 // mean nor what the limits are. A co-signer reading `--help` could not tell which permission group
 // to pass, nor that the collection window they were extending is capped at 24h.
 describe("shared --permission-id / --expiration document their semantics", () => {
-  const describeOf = (name: keyof typeof txModeFields): string =>
-    (txModeFields[name] as { description?: string }).description ?? "";
+  const describeOf = (name: keyof typeof txModeAndTron): string =>
+    (txModeAndTron[name] as { description?: string }).description ?? "";
 
   it("spells out what a permission group id means", () => {
     const text = describeOf("permissionId");
@@ -45,7 +49,7 @@ describe("shared --permission-id / --expiration document their semantics", () =>
   });
 
   it("states the expiration cap, and quotes the number the schema actually enforces", () => {
-    const schema = z.object(txModeFields);
+    const schema = z.object(txModeAndTron);
     expect(schema.safeParse({ buildOnly: true, expiration: 86_400_000 }).success).toBe(true);
     expect(schema.safeParse({ buildOnly: true, expiration: 86_400_001 }).success).toBe(false);
     // the description must quote that same bound — a stale number here is worse than none
@@ -88,7 +92,9 @@ describe("reference pages keep up with the shared transaction options", () => {
     return readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
       entry.isDirectory()
         ? pages(join(directory, entry.name))
-        : entry.name.endsWith(".md") ? [join(directory, entry.name)] : []
+        : entry.name.endsWith(".md")
+          ? [join(directory, entry.name)]
+          : [],
     );
   }
 
@@ -98,12 +104,17 @@ describe("reference pages keep up with the shared transaction options", () => {
   it("every --permission-id row carries the same value key the flag's help does", () => {
     // taken from the schema, not restated here: one wording, two surfaces
     const key = /\((0=owner[^)]*)\)/.exec(
-      (txModeFields.permissionId as { description?: string }).description ?? "",
+      (tronTxModeFields.permissionId as { description?: string }).description ?? "",
     )?.[1];
     expect(key).toBeTruthy();
 
     const behind = pages(DOCS)
-      .map((path) => ({ path, rows: readFileSync(path, "utf8").split("\n").filter((l) => l.startsWith("| `--permission-id")) }))
+      .map((path) => ({
+        path,
+        rows: readFileSync(path, "utf8")
+          .split("\n")
+          .filter((l) => l.startsWith("| `--permission-id")),
+      }))
       .filter(({ rows }) => rows.some((row) => !row.includes(key!)))
       .map(({ path }) => relative(DOCS, path));
 
@@ -112,8 +123,15 @@ describe("reference pages keep up with the shared transaction options", () => {
 
   it("every --expiration row gives the readable cap and the omitted-case default", () => {
     const behind = pages(DOCS)
-      .map((path) => ({ path, rows: readFileSync(path, "utf8").split("\n").filter((l) => l.startsWith("| `--expiration")) }))
-      .filter(({ rows }) => rows.some((row) => !(row.includes("24h") && /node default.*60s/.test(row))))
+      .map((path) => ({
+        path,
+        rows: readFileSync(path, "utf8")
+          .split("\n")
+          .filter((l) => l.startsWith("| `--expiration")),
+      }))
+      .filter(({ rows }) =>
+        rows.some((row) => !(row.includes("24h") && /node default.*60s/.test(row))),
+      )
       .map(({ path }) => relative(DOCS, path));
 
     expect(behind).toEqual([]);
@@ -129,5 +147,31 @@ describe("reference pages keep up with the shared transaction options", () => {
       .map(({ path }) => relative(DOCS, path));
 
     expect(behind).toEqual([]);
+  });
+});
+
+/**
+ * The governance group re-declared `--permission-id` with an int32 ceiling, so `--help` advertised a
+ * range the application layer then refused: `transactionMode()` accepts 0..9 and rejects anything
+ * above it with `invalid_option`, after the command has already started. TRON has at most eight
+ * active permissions (ids 2..9) plus owner (0), so 0..9 is the real bound and the override was
+ * simply wrong — it also downgraded the failure from a schema `invalid_value` to a runtime
+ * `invalid_option`, classifying the same mistake differently from every non-governance command.
+ */
+describe("governance --permission-id shares the protocol bound with every other command", () => {
+  const field = (fields: Record<string, unknown>) => z.object(fields as never);
+
+  it("rejects a permission id above the protocol maximum, as the TRON field set does", () => {
+    expect(field(governanceTxModeFields).safeParse({ permissionId: "10" }).success).toBe(false);
+    // The bound lives with the flag, which is TRON-only: a permission group is a TRON concept,
+    // so the shared set no longer declares it at all.
+    expect(field(tronTxModeFields).safeParse({ permissionId: "10" }).success).toBe(false);
+    expect(Object.keys(txModeFields)).not.toContain("permissionId");
+  });
+
+  it("still accepts the whole valid range", () => {
+    for (const id of ["0", "2", "9"]) {
+      expect(field(governanceTxModeFields).safeParse({ permissionId: id }).success).toBe(true);
+    }
   });
 });

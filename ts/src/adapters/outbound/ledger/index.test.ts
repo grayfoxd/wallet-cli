@@ -8,10 +8,19 @@ import { Ledger } from "./index.js";
 const { closeSpy, tip712Calls, failures } = vi.hoisted(() => ({
   closeSpy: vi.fn(async () => {}),
   tip712Calls: [] as Array<{ path: string; domainHash: string; messageHash: string }>,
-  failures: { tip712: undefined as Error | undefined, tip712Hang: false },
+  failures: {
+    tip712: undefined as Error | undefined,
+    tip712Hang: false,
+    open: undefined as Error | undefined,
+  },
 }));
-vi.mock("@ledgerhq/hw-transport-node-hid", () => ({
-  default: { open: async () => ({ close: closeSpy }) },
+vi.mock("@ledgerhq/hw-transport-node-hid-noevents", () => ({
+  default: {
+    open: async () => {
+      if (failures.open) throw failures.open;
+      return { close: closeSpy };
+    },
+  },
 }));
 // Every device APDU never resolves — models an on-device prompt that is never tapped.
 vi.mock("@ledgerhq/hw-app-trx", () => ({
@@ -30,7 +39,11 @@ vi.mock("@ledgerhq/hw-app-trx", () => ({
     }
     // Unlike the others this one resolves: the TIP-712 tests assert what reaches the device,
     // which a never-settling promise cannot show.
-    async signTIP712HashedMessage(path: string, domainHash: string, messageHash: string): Promise<string> {
+    async signTIP712HashedMessage(
+      path: string,
+      domainHash: string,
+      messageHash: string,
+    ): Promise<string> {
       if (failures.tip712) throw failures.tip712;
       if (failures.tip712Hang) return new Promise(() => {});
       tip712Calls.push({ path, domainHash, messageHash });
@@ -44,17 +57,19 @@ const PATH = "m/44'/195'/0'/0/0";
 // reaching the device, so a bare {raw_data_hex} stub would fail there instead of timing out.
 const RAW_TX = (() => {
   const raw = {
-    contract: [{
-      parameter: {
-        value: {
-          amount: 1000000,
-          owner_address: "4119e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
-          to_address: "41e552f6487585c2b58bc2c9bb4492bc1f17132cd0",
+    contract: [
+      {
+        parameter: {
+          value: {
+            amount: 1000000,
+            owner_address: "4119e7e376e7c213b7e7e7e46cc70a5dd086daff2a",
+            to_address: "41e552f6487585c2b58bc2c9bb4492bc1f17132cd0",
+          },
+          type_url: "type.googleapis.com/protocol.TransferContract",
         },
-        type_url: "type.googleapis.com/protocol.TransferContract",
+        type: "TransferContract",
       },
-      type: "TransferContract",
-    }],
+    ],
     ref_block_bytes: "0a1b",
     ref_block_hash: "c1e5f0a1d2b3c4d5",
     expiration: 1753180800000,
@@ -71,26 +86,34 @@ const RAW_TX = (() => {
 
 describe("Ledger adapter timeout", () => {
   it("bounds a hung device signMessage by timeoutMs", async () => {
-    await expect(new Ledger(20).signMessage("tron", PATH, "hi")).rejects.toMatchObject({ code: "timeout" });
+    await expect(new Ledger(20).signMessage("tron", PATH, "hi")).rejects.toMatchObject({
+      code: "timeout",
+    });
   });
 
   // Regression: on timeout the adapter must close the transport, otherwise the pending APDU keeps
   // the native HID handle open and the process hangs (violates the deterministic-exit CLI contract).
   it("closes the transport when a hung signMessage times out", async () => {
     closeSpy.mockClear();
-    await expect(new Ledger(20).signMessage("tron", PATH, "hi")).rejects.toMatchObject({ code: "timeout" });
+    await expect(new Ledger(20).signMessage("tron", PATH, "hi")).rejects.toMatchObject({
+      code: "timeout",
+    });
     await vi.waitFor(() => expect(closeSpy).toHaveBeenCalled(), { timeout: 500 });
   });
 
   it("closes the transport when a hung signTransaction times out", async () => {
     closeSpy.mockClear();
-    await expect(new Ledger(20).signTransaction("tron", PATH, RAW_TX)).rejects.toMatchObject({ code: "timeout" });
+    await expect(new Ledger(20).signTransaction("tron", PATH, RAW_TX)).rejects.toMatchObject({
+      code: "timeout",
+    });
     await vi.waitFor(() => expect(closeSpy).toHaveBeenCalled(), { timeout: 500 });
   });
 
   it("closes the transport when a hung getAddress times out", async () => {
     closeSpy.mockClear();
-    await expect(new Ledger(20).getAddress("tron", PATH)).rejects.toMatchObject({ code: "timeout" });
+    await expect(new Ledger(20).getAddress("tron", PATH)).rejects.toMatchObject({
+      code: "timeout",
+    });
     await vi.waitFor(() => expect(closeSpy).toHaveBeenCalled(), { timeout: 500 });
   });
 
@@ -106,7 +129,9 @@ describe("Ledger transaction signing", () => {
   // integrity rules apply. Before this, `tx sign --account <ledger>` skipped the check entirely.
   it("refuses a transaction whose txID does not hash its raw_data_hex, before reaching the device", async () => {
     const tampered = { ...(RAW_TX as object), txID: "00".repeat(32) };
-    await expect(new Ledger(2000).signTransaction("tron", PATH, tampered as never)).rejects.toMatchObject({
+    await expect(
+      new Ledger(2000).signTransaction("tron", PATH, tampered as never),
+    ).rejects.toMatchObject({
       code: "tx_integrity",
     });
   });
@@ -137,7 +162,11 @@ describe("Ledger abort signal", () => {
         .signTypedData(
           "tron",
           PATH,
-          { domain: { name: "X", version: "1", chainId: 1 }, types: { A: [{ name: "x", type: "uint256" }] }, message: { x: "1" } },
+          {
+            domain: { name: "X", version: "1", chainId: 1 },
+            types: { A: [{ name: "x", type: "uint256" }] },
+            message: { x: "1" },
+          },
           ac.signal,
         )
         .catch((e) => e);
@@ -155,7 +184,9 @@ describe("Ledger app-setting errors", () => {
   // default) the device answers 0x6a8c, which otherwise surfaces as "UNKNOWN_ERROR (0x6a8c)" and
   // leaves the user with no idea the fix is a toggle in the app's own settings menu.
   it("maps a missing app setting to an actionable error", async () => {
-    const apdu = Object.assign(new Error("Ledger device: UNKNOWN_ERROR (0x6a8c)"), { statusCode: 0x6a8c });
+    const apdu = Object.assign(new Error("Ledger device: UNKNOWN_ERROR (0x6a8c)"), {
+      statusCode: 0x6a8c,
+    });
     failures.tip712 = apdu;
     try {
       await expect(
@@ -176,7 +207,9 @@ describe("Ledger unsupported instruction (0x6d00)", () => {
   // TRON-specific: the installed app version does not implement the instruction, or the wrong app is
   // open. It must map to a generic hint, not the opaque "auth_required / …(0x6d00)".
   it("maps INS_NOT_SUPPORTED to a generic, chain-agnostic ledger_unsupported error", async () => {
-    const apdu = Object.assign(new Error("Ledger device: INS_NOT_SUPPORTED (0x6d00)"), { statusCode: 0x6d00 });
+    const apdu = Object.assign(new Error("Ledger device: INS_NOT_SUPPORTED (0x6d00)"), {
+      statusCode: 0x6d00,
+    });
     failures.tip712 = apdu;
     let err: unknown;
     try {
@@ -206,7 +239,9 @@ describe("Ledger incorrect data (0x6a80)", () => {
   // Unmapped, this surfaced as auth_required + a raw "UNKNOWN_ERROR (0x6a80)" — the wrong category
   // and an unreadable message.
   it("maps E_INCORRECT_DATA to ledger_unsupported instead of auth_required", async () => {
-    const apdu = Object.assign(new Error("Ledger device: UNKNOWN_ERROR (0x6a80)"), { statusCode: 0x6a80 });
+    const apdu = Object.assign(new Error("Ledger device: UNKNOWN_ERROR (0x6a80)"), {
+      statusCode: 0x6a80,
+    });
     failures.tip712 = apdu;
     let err: unknown;
     try {
@@ -231,7 +266,12 @@ describe("Ledger incorrect data (0x6a80)", () => {
 
 describe("Ledger TIP-712", () => {
   const domain = { name: "SunPerp", version: "1", chainId: 728126428 };
-  const types = { Order: [{ name: "trader", type: "address" }, { name: "size", type: "uint256" }] };
+  const types = {
+    Order: [
+      { name: "trader", type: "address" },
+      { name: "size", type: "uint256" },
+    ],
+  };
   const message = { trader: "TCLBgkbfVkJroVBJVqBEsxtPNQEQMTQCLQ", size: "1000000" };
   const encoder = tronUtils.typedData.TypedDataEncoder;
 
@@ -243,7 +283,9 @@ describe("Ledger TIP-712", () => {
     // hw-app-trx wants the path without the leading "m/"; its hexBuffer accepts bare hex.
     expect(tip712Calls[0]!.path).toBe("44'/195'/0'/0/0");
     expect(tip712Calls[0]!.domainHash).toBe(encoder.hashDomain(domain).replace(/^0x/, ""));
-    expect(tip712Calls[0]!.messageHash).toBe(encoder.hashStruct("Order", types, message).replace(/^0x/, ""));
+    expect(tip712Calls[0]!.messageHash).toBe(
+      encoder.hashStruct("Order", types, message).replace(/^0x/, ""),
+    );
     // the app returns bare 65-byte hex; the adapter 0x-prefixes it like signPersonalMessage does.
     expect(out.signature).toBe(`0x${"aa".repeat(65)}`);
     expect(out.primaryType).toBe("Order");
@@ -253,8 +295,63 @@ describe("Ledger TIP-712", () => {
   it("rejects a payload that cannot be hashed before touching the device", async () => {
     tip712Calls.length = 0;
     await expect(
-      new Ledger(2000).signTypedData("tron", PATH, { domain, types, message: { trader: "nope", size: "1" } }),
+      new Ledger(2000).signTypedData("tron", PATH, {
+        domain,
+        types,
+        message: { trader: "nope", size: "1" },
+      }),
     ).rejects.toMatchObject({ code: "invalid_transaction" });
     expect(tip712Calls).toHaveLength(0);
+  });
+});
+
+/**
+ * The two device states a user hits most, and they used to arrive as the same code.
+ *
+ * `auth_required` for an unplugged device claims a credential is missing when nothing is
+ * connected, and it read identically to a connected-but-locked device — whose fix (enter the PIN)
+ * has nothing to do with the other one (plug it in). §11 names them separately for that reason.
+ */
+describe("Ledger device states", () => {
+  it("reports an unreachable device as device_not_found, not auth_required", async () => {
+    failures.open = new Error("cannot open device");
+    try {
+      await expect(new Ledger(2000).getAddress("tron", PATH)).rejects.toMatchObject({
+        code: "device_not_found",
+      });
+    } finally {
+      failures.open = undefined;
+    }
+  });
+
+  it("reports a locked device as device_locked, whichever way the transport says so", async () => {
+    for (const e of [
+      Object.assign(new Error("Ledger device: Locked device (0x5515)"), { statusCode: 0x5515 }),
+      Object.assign(new Error("Locked device"), { name: "LockedDeviceError" }),
+    ]) {
+      failures.open = e;
+      try {
+        await expect(new Ledger(2000).getAddress("tron", PATH)).rejects.toMatchObject({
+          code: "device_locked",
+        });
+      } finally {
+        failures.open = undefined;
+      }
+    }
+  });
+
+  it("maps a locked device reported as an APDU status word to device_locked", async () => {
+    failures.tip712 = Object.assign(new Error("Locked device (0x5515)"), { statusCode: 0x5515 });
+    try {
+      await expect(
+        new Ledger(2000).signTypedData("tron", PATH, {
+          domain: { name: "X", version: "1", chainId: 1 },
+          types: { A: [{ name: "x", type: "uint256" }] },
+          message: { x: "1" },
+        }),
+      ).rejects.toMatchObject({ code: "device_locked" });
+    } finally {
+      failures.tip712 = undefined;
+    }
   });
 });

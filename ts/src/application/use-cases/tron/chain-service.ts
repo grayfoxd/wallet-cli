@@ -1,4 +1,4 @@
-import type { NetworkDescriptor } from "../../../domain/types/index.js";
+import { endpointHost, type NetworkDescriptor } from "../../../domain/types/index.js";
 import { UsageError } from "../../../domain/errors/index.js";
 import type { ChainGatewayProvider } from "../../ports/chain/gateway-provider.js";
 
@@ -6,7 +6,10 @@ import type { ChainGatewayProvider } from "../../ports/chain/gateway-provider.js
 const IN_SYNC_WINDOW_MS = 9_000;
 
 /** "ts:price,ts:price,…" (node price timeline) → structured history; current = last segment. */
-function parsePriceTimeline(raw: string): { currentSunPerUnit: number; history: Array<{ since: number; price: number }> } {
+function parsePriceTimeline(raw: string): {
+  currentSunPerUnit: number;
+  history: Array<{ since: number; price: number }>;
+} {
   const history = raw
     .split(",")
     .map((seg) => seg.split(":"))
@@ -53,22 +56,32 @@ export class TronChainService {
   async node(network: NetworkDescriptor) {
     const gateway = this.gateways.get(network, "tron");
     const [info, head] = await Promise.all([gateway.getNodeInfo(), gateway.getBlock()]);
-    const header = ((head as Record<string, any>)?.block_header?.raw_data ?? {}) as { number?: number; timestamp?: number };
+    const header = ((head as Record<string, any>)?.block_header?.raw_data ?? {}) as {
+      number?: number;
+      timestamp?: number;
+    };
     const headNumber = Number(header.number ?? 0);
     const headTimestamp = Number(header.timestamp ?? 0);
     const solidNumber = blockNum(info.solidityBlock);
     const codeVersion = info.configNodeInfo?.codeVersion;
     return {
-      endpoint: network.httpEndpoint ?? null,
+      // HOST only: a configured endpoint can carry an API key in its path, and this command's
+      // output is the one people paste into issues and CI logs. `config networks.<id>.httpEndpoint`
+      // is where a full URL is handed over, because there it was asked for by name.
+      endpoint: endpointHost(network.httpEndpoint) || null,
       version: codeVersion ? `java-tron ${codeVersion}` : null,
       p2pVersion: info.configNodeInfo?.p2pVersion ?? null,
       headBlock: { number: headNumber, timestamp: headTimestamp },
       solidBlock: solidNumber === null ? null : { number: solidNumber },
       lagBlocks: solidNumber === null ? null : headNumber - solidNumber,
       inSync: headTimestamp > 0 && Date.now() - headTimestamp <= IN_SYNC_WINDOW_MS,
-      peers: info.currentConnectCount === undefined
-        ? null
-        : { connected: Number(info.currentConnectCount), active: Number(info.activeConnectCount ?? 0) },
+      peers:
+        info.currentConnectCount === undefined
+          ? null
+          : {
+              connected: Number(info.currentConnectCount),
+              active: Number(info.activeConnectCount ?? 0),
+            },
     };
   }
 }

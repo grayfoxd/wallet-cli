@@ -6,23 +6,32 @@ import type { TypedDataService } from "../../../../application/use-cases/typed-d
 import { TextFormatters } from "../render/index.js";
 
 const typedDataFields = z.object({
-  typedData: z.string().min(1)
+  typedData: z
+    .string()
+    .min(1)
     .describe(`EIP-712/TIP-712 JSON: {"domain":…,"types":…,"primaryType"?:…,"message":…}`),
 });
 
 export const typedDataSignSpec: ChainSpec = {
   path: ["typed-data", "sign"],
-  network: "optional", wallet: "optional", auth: "required",
+  network: "optional",
+  wallet: "optional",
+  auth: "required",
   broadcasts: false,
   capability: "typedData.sign",
   summary: "Sign EIP-712 / TIP-712 structured data",
   description:
     "Prints the signature, the digest that was signed, and the primary type.\n" +
-    "`EIP712Domain` in `types` is ignored, `value` is accepted for `message`, and TRON base58\n" +
-    "addresses work in address fields.",
+    "`EIP712Domain` in `types` is ignored and `value` is accepted for `message`; address values\n" +
+    "are interpreted by the selected chain family's signing strategy.",
   baseFields: typedDataFields,
   examples: [
-    { cmd: `wallet-cli typed-data sign --typed-data '{"domain":{...},"types":{...},"message":{...}}'` },
+    {
+      cmd: `wallet-cli typed-data sign --typed-data '{"domain":{...},"types":{...},"message":{...}}' --network nile`,
+    },
+    {
+      cmd: `wallet-cli typed-data sign --typed-data '{"domain":{...},"types":{...},"message":{...}}' --network sepolia`,
+    },
   ],
   formatText: TextFormatters.typedDataSign,
 };

@@ -19,7 +19,7 @@ const scope = {
   emit: () => {},
   warn: () => {},
 } as never;
-const net = { family: "tron", id: "nile" } as never;
+const net = { family: "tron", nativeSymbol: "TRX", id: "nile" } as never;
 
 describe("TxPipeline.signOnly", () => {
   it("signs a caller-supplied transaction without building, estimating or broadcasting", async () => {
@@ -57,6 +57,8 @@ describe("TxPipeline.signOnly", () => {
     const p = pipelineWith({ kind: "software", address: "T1", sign: async () => ({}) }, () => {
       throw new Error("watch-only");
     });
-    await expect(p.signOnly({ ctx: scope, net, account: "main", tx: TX })).rejects.toThrow(/watch-only/);
+    await expect(p.signOnly({ ctx: scope, net, account: "main", tx: TX })).rejects.toThrow(
+      /watch-only/,
+    );
   });
 });

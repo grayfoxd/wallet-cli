@@ -31,10 +31,19 @@ describe("source registry", () => {
   });
 
   it("pins family for single-family sources only", () => {
-    const ledger: Source = { type: "ledger", family: "tron", path: "m/44'/195'/0'/0/0", address: "T..." };
+    const ledger: Source = {
+      type: "ledger",
+      family: "tron",
+      path: "m/44'/195'/0'/0/0",
+      address: "T...",
+    };
     const watch: Source = { type: "watch", family: "tron", address: "T..." };
     const seed: Source = { type: "seed", vaultId: "vlt_x", addresses: {} };
-    const priv: Source = { type: "privateKey", keyId: "key_x", addresses: { tron: "T..." } };
+    const priv: Source = {
+      type: "privateKey",
+      keyId: "key_x",
+      addresses: { tron: "T...", evm: "0x..." },
+    };
     expect(sourceFamily(ledger)).toBe("tron");
     expect(sourceFamily(watch)).toBe("tron");
     expect(sourceFamily(seed)).toBeUndefined();

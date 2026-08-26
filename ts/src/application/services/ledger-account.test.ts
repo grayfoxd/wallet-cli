@@ -23,9 +23,27 @@ describe("resolveLedgerPath", () => {
   });
 
   it("rejects a --path whose coin_type contradicts the app", async () => {
-    await expect(resolveLedgerPath(fakeLedger(), "tron", { path: "m/44'/60'/0'/0/0" })).rejects.toMatchObject({
+    await expect(
+      resolveLedgerPath(fakeLedger(), "tron", { path: "m/44'/60'/0'/0/0" }),
+    ).rejects.toMatchObject({
       code: "invalid_option",
     });
+  });
+
+  /**
+   * A malformed path and a wrong-coin path are different mistakes.
+   *
+   * Both used to answer "--path coin_type ? does not match --app tron", which describes a mismatch
+   * the caller never had. And the old check matched only the `m/44'/<coin>'/` prefix, so a path
+   * with rubbish after it was accepted and sent to the device.
+   */
+  it("rejects a value that is not a derivation path with invalid_path", async () => {
+    for (const bad of ["notapath", "m/44'/195'/garbage", "m/44'/195'", "44'/195'/0'/0/0", ""]) {
+      await expect(
+        resolveLedgerPath(fakeLedger(), "tron", { path: bad }),
+        bad,
+      ).rejects.toMatchObject({ code: "invalid_path" });
+    }
   });
 
   it("locates a known --address by bounded scan and returns its path", async () => {
@@ -35,7 +53,10 @@ describe("resolveLedgerPath", () => {
   });
 
   it("throws ledger_address_not_found past the scan limit, citing the recovery flags", async () => {
-    const err = await resolveLedgerPath(fakeLedger(), "tron", { address: "Tnope", scanLimit: 3 }).catch((e) => e);
+    const err = await resolveLedgerPath(fakeLedger(), "tron", {
+      address: "Tnope",
+      scanLimit: 3,
+    }).catch((e) => e);
     expect(err.code).toBe("ledger_address_not_found");
     expect(err.message).toContain("--scan-limit");
     expect(err.message).toContain("--index");

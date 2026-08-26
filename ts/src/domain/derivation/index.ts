@@ -2,7 +2,13 @@
  * Derivation — BIP39 mnemonic/seed plus BIP44 HD derivation.
  * secp256k1 is shared by both families; only the coin type differs.
  */
-import { mnemonicToSeedSync, generateMnemonic, validateMnemonic, mnemonicToEntropy, entropyToMnemonic } from "@scure/bip39";
+import {
+  mnemonicToSeedSync,
+  generateMnemonic,
+  validateMnemonic,
+  mnemonicToEntropy,
+  entropyToMnemonic,
+} from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 import { HDKey } from "@scure/bip32";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -32,15 +38,19 @@ export class Derivation {
     return entropyToMnemonic(entropy, wordlist);
   }
 
-  /** m/44'/{coin}'/{account}'/0/0 */
+  /** the family's own BIP44 template with `account` slotted into the level it uses (§1.2). */
   static path(family: ChainFamily, account: number): string {
-    return `m/44'/${FAMILIES[family].coinType}'/${account}'/0/0`;
+    const { coinType, indexAt } = FAMILIES[family];
+    return indexAt === "account"
+      ? `m/44'/${coinType}'/${account}'/0/0`
+      : `m/44'/${coinType}'/0'/0/${account}`;
   }
 
   /** Derive a keypair from a 64-byte seed at the given BIP44 path. publicKey is uncompressed (65B). */
   static derive(seed: Bytes, path: string): KeyPair {
     const node = HDKey.fromMasterSeed(seed).derive(path);
-    if (!node.privateKey) throw new WalletError("encoding_error", `cannot derive private key at ${path}`);
+    if (!node.privateKey)
+      throw new WalletError("encoding_error", `cannot derive private key at ${path}`);
     const privateKey = node.privateKey;
     const publicKey = secp256k1.getPublicKey(privateKey, false); // uncompressed
     return { privateKey, publicKey };

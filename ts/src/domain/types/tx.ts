@@ -54,7 +54,14 @@ export type TxOutcome =
   | { stage: "plan"; tx: UnsignedTx; fee: FeeReport }
   | { stage: "built"; tx: UnsignedTx; hex: string; fee: FeeReport }
   // `fee` is absent when the caller supplied the transaction (tx sign): nothing was estimated.
-  | { stage: "signed"; signed: SignedTx; hex?: string; fee?: FeeReport; address?: string; txId?: string }
+  | {
+      stage: "signed";
+      signed: SignedTx;
+      hex?: string;
+      fee?: FeeReport;
+      address?: string;
+      txId?: string;
+    }
   | ({ stage: BroadcastStage } & BroadcastResult);
 
 // ════════════════════ per-command typed text outputs ══════════════════════
@@ -77,19 +84,63 @@ export interface TxStatusView {
   /** kept for back-compat: `state === "failed"`. */
   failed: boolean;
   blockNumber?: number | string;
+  /**
+   * Head height minus the transaction's block — how much chain has been built on top of it.
+   *
+   * Present only once there IS a block, and best-effort: the head read is a second call, and a
+   * failed one costs this field rather than the answer the command was asked for. `--wait` stops
+   * at the receipt, so this is the number a caller reads to decide whether that is enough.
+   */
+  confirmations?: number;
 }
 
 /** decoded transfer parties of a tx (best-effort from the raw tx). */
-export interface TxParties { from?: string; to?: string; amount?: string; symbol?: string; contract?: string }
+export interface TxParties {
+  from?: string;
+  to?: string;
+  amount?: string;
+  /** the same amount in base units — the exact integer, beside the scaled display value. */
+  rawAmount?: string;
+  symbol?: string;
+  contract?: string;
+}
 
 /** which action a broadcast receipt describes — drives the summary verb + extra rows.
  *  A typed discriminant replaces matching on the stringly command id. */
 export type TxReceiptKind =
-  | "send" | "broadcast" | "sign"
-  | "stake-freeze" | "stake-unfreeze" | "stake-delegate" | "stake-undelegate" | "stake-withdraw" | "stake-cancel"
-  | "contract-send" | "contract-deploy"
-  | "vote-cast" | "reward-withdraw" | "permission-update"
-  | "account-activate" | "account-set";
+  | "send"
+  | "broadcast"
+  | "sign"
+  | "stake-freeze"
+  | "stake-unfreeze"
+  | "stake-delegate"
+  | "stake-undelegate"
+  | "stake-withdraw"
+  | "stake-cancel"
+  | "contract-send"
+  | "contract-deploy"
+  | "proposal-create"
+  | "proposal-approve"
+  | "proposal-delete"
+  | "witness-create"
+  | "witness-update"
+  | "witness-set-brokerage"
+  | "contract-clear-abi"
+  | "contract-set-origin-energy-limit"
+  | "contract-set-user-resource-percent"
+  | "vote-cast"
+  | "reward-withdraw"
+  | "permission-update"
+  | "account-activate"
+  | "account-set"
+  | "asset-issue"
+  | "asset-update"
+  | "asset-participate"
+  | "asset-unfreeze"
+  | "exchange-create"
+  | "exchange-inject"
+  | "exchange-withdraw"
+  | "exchange-trade";
 
 /**
  * Canonical tx receipt the signing commands return (dry-run / sign-only / broadcast stages).
@@ -115,6 +166,8 @@ export interface TxReceiptView {
   hex?: string;
   transaction?: import("./multisig.js").TxApprovalView;
   multiSignFeeSun?: number;
+  /** pre-broadcast checks a dry run ran; a blocker throws, so these are what held or was skipped. */
+  checks?: Array<{ name: string; status: "ok" | "warning" | "skipped"; detail: string }>;
   // transfer / stake inputs
   rawAmount?: string;
   amountSun?: string | number;
@@ -132,10 +185,82 @@ export interface TxReceiptView {
   // contract
   method?: string;
   contractAddress?: string;
+  /** approve(address,uint256) only: who was approved, and for how much in token units
+   *  ("unlimited" for 2^256-1). The command line carries a scaled uint256 nobody can read. */
+  spender?: string;
+  allowance?: string;
+  allowanceDecimals?: number;
+  // TRC10 assets — quantities in the asset's minimal units, rendered with `precision`
+  name?: string;
+  abbr?: string;
+  issuerAddress?: string;
+  participantAddress?: string;
+  precision?: number;
+  totalSupply?: string;
+  price?: string;
+  trxNum?: number;
+  num?: number;
+  startTime?: number;
+  endTime?: number;
+  url?: string;
+  description?: string;
+  freeAssetNetLimit?: number;
+  publicFreeAssetNetLimit?: number;
+  frozenSupply?: Array<{ amount: string; days: number }>;
+  paidSun?: string;
+  receivedAmount?: string;
+  // Bancor exchange — quantities in each token's minimal units, rendered with its own decimals
+  exchangeId?: number;
+  pair?: string;
+  creatorAddress?: string;
+  traderAddress?: string;
+  firstTokenId?: string;
+  firstTokenQuant?: string;
+  firstTokenLabel?: string;
+  firstTokenDecimals?: number;
+  secondTokenId?: string;
+  secondTokenQuant?: string;
+  secondTokenLabel?: string;
+  secondTokenDecimals?: number;
+  tokenId?: string;
+  tokenQuant?: string;
+  tokenLabel?: string;
+  tokenDecimals?: number;
+  otherTokenId?: string;
+  otherTokenQuant?: string;
+  otherTokenLabel?: string;
+  otherTokenDecimals?: number;
+  reserveAfter?: string;
+  otherReserveAfter?: string;
+  soldTokenId?: string;
+  soldQuant?: string;
+  soldLabel?: string;
+  soldDecimals?: number;
+  receivedTokenId?: string;
+  receivedQuant?: string;
+  receivedLabel?: string;
+  receivedDecimals?: number;
+  estimatedReceivedQuant?: string;
+  minReceivedQuant?: string;
+  releasedAmount?: string;
+  stillFrozenAmount?: string;
   // confirmed / failed on-chain numbers
   blockNumber?: number;
   energyUsed?: number;
   feeSun?: string | number;
+  feeWei?: string;
+  /** gas actually burnt (EVM); pairs with effectiveGasPriceWei to explain feeWei. */
+  gasUsed?: string | number;
+  /** the per-gas price the chain settled at (EVM), decimal wei. */
+  effectiveGasPriceWei?: string;
+  /**
+   * The transaction's own nonce (EVM).
+   *
+   * Captured while building rather than read back from a receipt: it is decided before the
+   * transaction is signed, and §4.3 names it the entry point for diagnosing a stuck transaction —
+   * which is exactly the case where no receipt will ever arrive.
+   */
+  nonce?: number | string;
   withdrawnSun?: string | number;
   result?: string;
   failed?: boolean;
@@ -145,10 +270,24 @@ export interface TxReceiptView {
  *  tx/receipt blobs (kept for JSON detail). Each family populates only its own subset. */
 export interface TxInfoView extends TxParties {
   txid: string;
+  /** coarse kind: transfer / contract-call / contract-creation (EVM). */
+  type?: string;
+  /** the transaction's own nonce (EVM). */
+  nonce?: number;
+  /** the including block's timestamp, Unix SECONDS — the same unit `chain node` reports. */
+  blockTime?: number;
+  /** the per-gas price the chain settled at (EVM), decimal wei. */
+  effectiveGasPriceWei?: string;
   status?: string;
   blockNumber?: number | string;
+  /** head height minus this transaction's block; best-effort, see TxStatusView.confirmations. */
+  confirmations?: number;
   energyUsed?: number; // tron execution resource
+  gasUsed?: number | string; // evm execution resource
   feeSun?: number; // tron native fee (sun)
+  // EVM native fee. A separate field rather than a shared `fee`: the UNIT is in the name, so a
+  // reader can never mistake one family's magnitude for the other's (18 decimals vs 6).
+  feeWei?: string;
   transaction: unknown;
   info?: unknown; // tron
   receipt?: unknown; // tron

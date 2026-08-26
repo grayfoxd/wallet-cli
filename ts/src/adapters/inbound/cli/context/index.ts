@@ -3,15 +3,27 @@
  * account-level: activeAccount is resolved lazily from --account/--wallet or wallets.json.
  * Build is side-effect-free; secrets never enter the serializable surface.
  */
-import type { AccountRef, ChainFamily, Config, OutputMode, WarningView } from "../../../../domain/types/index.js";
+import { sourceFamily } from "../../../../domain/sources/index.js";
+import type {
+  AccountRef,
+  ChainFamily,
+  Config,
+  OutputMode,
+  WarningView,
+} from "../../../../domain/types/index.js";
 import type { ProgressEvent } from "../../../../application/contracts/index.js";
 import type { NetworkRegistry } from "../../../../application/ports/network-registry.js";
-import type { ExecutionContext, Globals, SecretResolver, StreamManager } from "../contracts/index.js";
+import type {
+  ExecutionContext,
+  Globals,
+  SecretResolver,
+  StreamManager,
+} from "../contracts/index.js";
 import type { OutputFormatter } from "../output/index.js";
 import type { Prompter } from "../input/prompt/index.js";
 import type { AccountStore } from "../../../../application/ports/account-store.js";
 import { accountRef, walletAddress } from "../../../../domain/wallet/index.js";
-import { WalletError } from "../../../../domain/errors/index.js";
+import { UsageError, WalletError } from "../../../../domain/errors/index.js";
 import { SOURCE_KINDS } from "../../../../domain/sources/index.js";
 import { addressCodec, familyOf } from "../../../../domain/family/index.js";
 
@@ -73,7 +85,10 @@ class ExecutionContextImpl implements ExecutionContext {
       ref = ks.activeAccount();
     }
     if (!ref) {
-      throw new WalletError("missing_wallet_address", "no active account; import one or pass --account");
+      throw new WalletError(
+        "missing_wallet_address",
+        "no active account; import one or pass --account",
+      );
     }
     this.#activeRef = ref;
     return ref;
@@ -85,7 +100,18 @@ class ExecutionContextImpl implements ExecutionContext {
     }
     const { wallet, index } = this.deps.keystore.resolveAccount(this.activeAccount);
     const address = walletAddress(wallet, family, index);
-    if (!address) throw new WalletError("missing_wallet_address", `active account has no ${family} address`);
+    if (!address) {
+      // The account exists, it simply lives on another chain — the one error here where the user
+      // did nothing wrong, so the message carries the way out. `missing_wallet_address` would
+      // conflate this with "no account at all", which is a different problem with a different fix.
+      const own = sourceFamily(wallet.source);
+      throw new UsageError(
+        "family_mismatch",
+        own
+          ? `selected account is ${own}-only and has no ${family} address; pass --network for a ${own} network, or change defaultNetwork`
+          : `active account has no ${family} address`,
+      );
+    }
     return address;
   }
 

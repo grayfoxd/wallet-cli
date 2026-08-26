@@ -1,13 +1,12 @@
+import { isTronNetwork } from "../domain/types/network.js";
 import type { OutputMode } from "../domain/types/index.js";
 import type { Globals, SessionRef } from "../adapters/inbound/cli/contracts/index.js";
 import { ConfigLoader, NetworkRegistry } from "../adapters/outbound/config/index.js";
 import { YamlConfigDocument } from "../adapters/outbound/config/yaml-config-document.js";
-import {
-  CAP_SUMMARIES,
-  TRAIT_SUMMARIES,
-} from "../adapters/outbound/config/builtins.js";
+import { CAP_SUMMARIES, TRAIT_SUMMARIES } from "../adapters/outbound/config/builtins.js";
 import { AtomicFileStore } from "../adapters/outbound/persistence/fs/index.js";
 import { SecureBackupWriter } from "../adapters/outbound/persistence/backup-writer.js";
+import { FileBackupRecordStore } from "../adapters/outbound/persistence/backup-records.js";
 import { Keystore } from "../adapters/outbound/keystore/index.js";
 import { Ledger } from "../adapters/outbound/ledger/index.js";
 import { TokenBook } from "../adapters/outbound/tokenbook/index.js";
@@ -27,8 +26,11 @@ import { TargetResolver } from "../application/services/target/index.js";
 import { TxPipeline } from "../application/services/pipeline/index.js";
 import { ConfigService } from "../application/use-cases/config-service.js";
 import { WalletService } from "../application/use-cases/wallet-service.js";
-import { FAMILY_REGISTRY, familyMap } from "./family-registry.js";
+import { familyMap } from "./family-registry.js";
 import { registerTronChainCommands } from "./families/tron.js";
+import { registerEvmChainCommands } from "./families/evm.js";
+import { AccountBalanceService } from "../application/use-cases/account-balance-service.js";
+import { TokenBookService } from "../application/use-cases/token-book-service.js";
 import { TronLinkClient } from "../adapters/outbound/tronlink/client.js";
 import { GasFreeClient } from "../adapters/outbound/gasfree/client.js";
 import { ContactBook } from "../adapters/outbound/contactbook/index.js";
@@ -59,9 +61,7 @@ export function composeCliRuntime(options: BootstrapOptions) {
 
   const root = ConfigLoader.resolveRoot();
   const store = new AtomicFileStore();
-  const configService = new ConfigService(
-    new YamlConfigDocument(ConfigLoader.configPath(), store),
-  );
+  const configService = new ConfigService(new YamlConfigDocument(ConfigLoader.configPath(), store));
   const networkRegistry = new NetworkRegistry(config);
   const prompter = createPrompter();
   const secrets = new SecretResolver(streams, options.secretPaths, prompter);
@@ -70,12 +70,23 @@ export function composeCliRuntime(options: BootstrapOptions) {
   const walletService = new WalletService(
     keystore,
     ledger,
-    new SecureBackupWriter(root),
+    new SecureBackupWriter(),
+    new FileBackupRecordStore(root, store),
   );
   const tokenBook = new TokenBook(root, store);
   const contactBook = new ContactBook(root, store);
   const recipientResolver = new RecipientResolver(contactBook);
-  const priceProvider = createPriceProvider(config.price, timeoutMs);
+  const priceProvider = createPriceProvider(
+    config.price,
+    timeoutMs,
+    // Declared per network (§2.2), never inferred from the id: a user-configured chain we know
+    // nothing about stays unpriced (null = unknown), which is not the same as worth nothing.
+    new Set(
+      Object.values(config.networks)
+        .filter((n) => n.testnet === true)
+        .map((n) => n.id),
+    ),
+  );
   const gatewayProvider = new ChainGatewayRegistry(
     familyMap((plugin) => plugin.createGateway),
     timeoutMs,
@@ -98,10 +109,9 @@ export function composeCliRuntime(options: BootstrapOptions) {
   registerNetworkCommands(registry);
   registerContactCommands(registry, new ContactService(contactBook));
   registerEncodingCommands(registry, new EncodingService());
-  registerAddressCommands(
-    registry,
-    new AddressService(new SecureKeypairWriter(root)),
-  );
+  registerAddressCommands(registry, new AddressService(new SecureKeypairWriter(root)));
+  const accountBalances = new AccountBalanceService(gatewayProvider);
+  const tokenBookService = new TokenBookService(tokenBook);
   registerTronChainCommands(registry, {
     gateways: gatewayProvider,
     tokens: tokenBook,
@@ -113,13 +123,32 @@ export function composeCliRuntime(options: BootstrapOptions) {
     tronlink: new TronLinkClient(config, timeoutMs),
     gasfree: new GasFreeClient(config, timeoutMs),
     recipients: recipientResolver,
+    balances: accountBalances,
+    tokenBook: tokenBookService,
+  });
+  registerEvmChainCommands(registry, {
+    signers: signerResolver,
+    gateways: gatewayProvider,
+    balances: accountBalances,
+    tokens: tokenBook,
+    tokenBook: tokenBookService,
+    prices: priceProvider,
+    transactions: txPipeline,
+    recipients: recipientResolver,
   });
 
   const capabilitiesByFamily = registry.capabilityKeysByFamily();
   for (const network of Object.values(config.networks)) {
     const commandCapabilities = (capabilitiesByFamily.get(network.family) ?? [])
-      .filter((key) => key !== "tx.multisig.tronlink" || Boolean(network.tronlinkHttpEndpoint))
-      .filter((key) => !key.startsWith("gasfree.") || Boolean(network.gasfree))
+      .filter(
+        (key) =>
+          key !== "tx.multisig.tronlink" ||
+          (isTronNetwork(network) && Boolean(network.tronlinkHttpEndpoint)),
+      )
+      .filter(
+        (key) =>
+          !key.startsWith("gasfree.") || (isTronNetwork(network) && Boolean(network.gasfree)),
+      )
       .map((key) => ({
         key,
         summary: CAP_SUMMARIES[key] ?? key,
@@ -143,6 +172,8 @@ export function composeCliRuntime(options: BootstrapOptions) {
   const session: SessionRef = {};
 
   return {
+    root,
+    store,
     config,
     streams,
     formatter,
